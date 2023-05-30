@@ -1162,7 +1162,6 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
         let card_capacity = self.card()?.card_type;
 
         // NOTE(unsafe) DataBlock uses align 4
-        // cast to "&'a mut [u32]"
         let buffer = unsafe { &mut *((&mut buffer[..]) as *mut [DataBlock] as *mut [u32]) };
 
         // SDSC cards are byte addressed hence the blockaddress is in multiples of 512 bytes
@@ -1172,8 +1171,6 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
         };
         Self::cmd(Cmd::set_block_length(512), false)?; // CMD16
         Self::cmd(Cmd::set_block_count(blocks), false)?; // CMD23
-
-        info!("Read {} blocks from {}", blocks, address);
 
         let regs = T::regs();
         let on_drop = OnDrop::new(|| unsafe { Self::on_drop() });
@@ -1250,6 +1247,76 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
             drop(transfer);
         }
         res
+    }
+
+    pub async fn write_blocks(&mut self, block_idx: u32, buffer: &[DataBlock]) -> Result<(), Error> {
+        let blocks = buffer.len() as u32;
+        // let card = self.card.as_mut().ok_or(Error::NoCard)?;
+
+        // NOTE(unsafe) DataBlock uses align 4
+        let buffer = unsafe { &*((&buffer[..]) as *const [DataBlock] as *const [u32]) };
+
+        // SDSC cards are byte addressed hence the blockaddress is in multiples of 512 bytes
+        // let address = match card.card_type {
+        //     CardCapacity::SDSC => block_idx * 512,
+        //     _ => block_idx,
+        // };
+        let address = block_idx * 512;
+        Self::cmd(Cmd::set_block_length(512), false)?; // CMD16
+        Self::cmd(Cmd::set_block_count(blocks), false)?; // CMD23
+
+        let regs = T::regs();
+        let on_drop = OnDrop::new(|| unsafe { Self::on_drop() });
+
+        // sdmmc_v1 uses different cmd/dma order than v2, but only for writes
+        #[cfg(sdmmc_v1)]
+        Self::cmd(Cmd::write_multiple_blocks(address), true)?;
+
+        let transfer = self.prepare_datapath_write(buffer, 512 * blocks, 9);
+        InterruptHandler::<T>::data_interrupts(true);
+
+        // TODO sdmmc_v2
+        #[cfg(sdmmc_v2)]
+        Self::cmd(Cmd::write_multiple_blocks(address), true)?;
+
+        let res = poll_fn(|cx| {
+            T::state().register(cx.waker());
+            let status = unsafe { regs.star().read() };
+
+            if status.dcrcfail() {
+                return Poll::Ready(Err(Error::Crc));
+            } else if status.dtimeout() {
+                return Poll::Ready(Err(Error::Timeout));
+            } else if status.dataend() {
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Pending
+        })
+        .await;
+        Self::clear_interrupt_flags();
+
+        match res {
+            Ok(_) => {
+                on_drop.defuse();
+                Self::stop_datapath();
+                drop(transfer);
+
+                // TODO: Make this configurable
+                let mut timeout: u32 = 0x00FF_FFFF;
+
+                // Try to read card status (ACMD13)
+                while timeout > 0 {
+                    match self.read_sd_status().await {
+                        Ok(_) => return Ok(()),
+                        Err(Error::Timeout) => (), // Try again
+                        Err(e) => return Err(e),
+                    }
+                    timeout -= 1;
+                }
+                Err(Error::SoftwareTimeout)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn write_block(&mut self, block_idx: u32, buffer: &DataBlock) -> Result<(), Error> {
@@ -1433,6 +1500,11 @@ impl Cmd {
     /// CMD24: Block Write
     const fn write_single_block(addr: u32) -> Cmd {
         Cmd::new(24, addr, Response::Short)
+    }
+
+    /// CMD25: Multiple Block Write
+    const fn write_multiple_blocks(addr: u32) -> Cmd {
+        Cmd::new(25, addr, Response::Short)
     }
 
     const fn app_op_cmd(arg: u32) -> Cmd {
