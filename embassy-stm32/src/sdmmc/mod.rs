@@ -1157,6 +1157,56 @@ impl<'d, T: Instance, Dma: SdmmcDma<T> + 'd> Sdmmc<'d, T, Dma> {
     }
 
     #[inline(always)]
+    pub async fn read_blocks(&mut self, first_block_idx: u32, buffer: &mut [DataBlock]) -> Result<(), Error> {
+        let blocks = buffer.len() as u32;
+        let card_capacity = self.card()?.card_type;
+
+        // NOTE(unsafe) DataBlock uses align 4
+        // cast to "&'a mut [u32]"
+        let buffer = unsafe { &mut *((&mut buffer[..]) as *mut [DataBlock] as *mut [u32]) };
+
+        // SDSC cards are byte addressed hence the blockaddress is in multiples of 512 bytes
+        let address = match card_capacity {
+            CardCapacity::SDSC => first_block_idx * 512,
+            _ => first_block_idx,
+        };
+        Self::cmd(Cmd::set_block_length(512), false)?; // CMD16
+        Self::cmd(Cmd::set_block_count(blocks), false)?; // CMD23
+
+        info!("Read {} blocks from {}", blocks, address);
+
+        let regs = T::regs();
+        let on_drop = OnDrop::new(|| unsafe { Self::on_drop() });
+
+        let transfer = self.prepare_datapath_read(buffer, 512 * blocks, 9);
+        InterruptHandler::<T>::data_interrupts(true);
+        Self::cmd(Cmd::read_multiple_blocks(address), true)?;
+
+        let res = poll_fn(|cx| {
+            T::state().register(cx.waker());
+            let status = unsafe { regs.star().read() };
+
+            if status.dcrcfail() {
+                return Poll::Ready(Err(Error::Crc));
+            } else if status.dtimeout() {
+                return Poll::Ready(Err(Error::Timeout));
+            } else if status.dataend() {
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Pending
+        })
+        .await;
+        Self::clear_interrupt_flags();
+
+        if res.is_ok() {
+            on_drop.defuse();
+            Self::stop_datapath();
+            drop(transfer);
+        }
+        res
+    }
+
+    #[inline(always)]
     pub async fn read_block(&mut self, block_idx: u32, buffer: &mut DataBlock) -> Result<(), Error> {
         let card_capacity = self.card()?.card_type;
 
@@ -1372,9 +1422,13 @@ impl Cmd {
     }
 
     /// CMD18: Multiple Block Read
-    //const fn read_multiple_blocks(addr: u32) -> Cmd {
-    //    Cmd::new(18, addr, Response::Short)
-    //}
+    const fn read_multiple_blocks(addr: u32) -> Cmd {
+        Cmd::new(18, addr, Response::Short)
+    }
+
+    const fn set_block_count(block_count: u32) -> Cmd {
+        Cmd::new(23, block_count, Response::Short)
+    }
 
     /// CMD24: Block Write
     const fn write_single_block(addr: u32) -> Cmd {
