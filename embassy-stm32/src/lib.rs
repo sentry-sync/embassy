@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![cfg_attr(feature = "nightly", feature(async_fn_in_trait, impl_trait_projections))]
 
 // This must go FIRST so that all the other modules see its macros.
@@ -41,8 +41,6 @@ pub mod crc;
 pub mod flash;
 #[cfg(all(spi_v1, rcc_f4))]
 pub mod i2s;
-#[cfg(stm32wb)]
-pub mod ipcc;
 pub mod pwm;
 #[cfg(quadspi)]
 pub mod qspi;
@@ -77,7 +75,7 @@ pub(crate) mod _generated {
 pub mod interrupt {
     //! Interrupt definitions and macros to bind them.
     pub use cortex_m::interrupt::{CriticalSection, Mutex};
-    pub use embassy_cortex_m::interrupt::{Binding, Handler, Interrupt, InterruptExt, Priority};
+    pub use embassy_cortex_m::interrupt::{Binding, Handler, Interrupt, Priority};
 
     pub use crate::_generated::interrupt::*;
 

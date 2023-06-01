@@ -3,13 +3,12 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
-use embassy_cortex_m::interrupt::Interrupt;
 use embassy_hal_common::drop::OnDrop;
 use embassy_hal_common::{into_ref, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 use fixed::types::I30F2;
 
-use crate::interrupt::InterruptExt;
+use crate::interrupt::Interrupt;
 use crate::peripherals::TEMP;
 use crate::{interrupt, pac, Peripheral};
 
@@ -42,8 +41,8 @@ impl<'d> Temp<'d> {
         into_ref!(_peri);
 
         // Enable interrupt that signals temperature values
-        unsafe { interrupt::TEMP::steal() }.unpend();
-        unsafe { interrupt::TEMP::steal() }.enable();
+        interrupt::TEMP::unpend();
+        unsafe { interrupt::TEMP::enable() };
 
         Self { _peri }
     }
@@ -56,8 +55,19 @@ impl<'d> Temp<'d> {
     /// # Example
     ///
     /// ```no_run
-    /// let mut t = Temp::new(p.TEMP, interrupt::take!(TEMP));
+    /// use embassy_nrf::{bind_interrupts, temp};
+    /// use embassy_nrf::temp::Temp;
+    /// use embassy_time::{Duration, Timer};
+    ///
+    /// bind_interrupts!(struct Irqs {
+    ///     TEMP => temp::InterruptHandler;
+    /// });
+    ///
+    /// # async {
+    /// # let p: embassy_nrf::Peripherals = todo!();
+    /// let mut t = Temp::new(p.TEMP, Irqs);
     /// let v: u16 = t.read().await.to_num::<u16>();
+    /// # };
     /// ```
     pub async fn read(&mut self) -> I30F2 {
         // In case the future is dropped, stop the task and reset events.

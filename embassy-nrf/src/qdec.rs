@@ -6,12 +6,11 @@ use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
 
-use embassy_cortex_m::interrupt::Interrupt;
 use embassy_hal_common::{into_ref, PeripheralRef};
 
 use crate::gpio::sealed::Pin as _;
 use crate::gpio::{AnyPin, Pin as GpioPin};
-use crate::interrupt::InterruptExt;
+use crate::interrupt::Interrupt;
 use crate::{interrupt, Peripheral};
 
 /// Quadrature decoder driver.
@@ -134,8 +133,8 @@ impl<'d, T: Instance> Qdec<'d, T> {
             SamplePeriod::_131ms => w.sampleper()._131ms(),
         });
 
-        unsafe { T::Interrupt::steal() }.unpend();
-        unsafe { T::Interrupt::steal() }.enable();
+        T::Interrupt::unpend();
+        unsafe { T::Interrupt::enable() };
 
         // Enable peripheral
         r.enable.write(|w| w.enable().set_bit());
@@ -154,10 +153,19 @@ impl<'d, T: Instance> Qdec<'d, T> {
     /// # Example
     ///
     /// ```no_run
-    /// let irq = interrupt::take!(QDEC);
+    /// use embassy_nrf::qdec::{self, Qdec};
+    /// use embassy_nrf::{bind_interrupts, peripherals};
+    ///
+    /// bind_interrupts!(struct Irqs {
+    ///     QDEC => qdec::InterruptHandler<peripherals::QDEC>;
+    /// });
+    ///
+    /// # async {
+    /// # let p: embassy_nrf::Peripherals = todo!();
     /// let config = qdec::Config::default();
-    /// let mut q = Qdec::new(p.QDEC, p.P0_31, p.P0_30, config);
+    /// let mut q = Qdec::new(p.QDEC, Irqs, p.P0_31, p.P0_30, config);
     /// let delta = q.read().await;
+    /// # };
     /// ```
     pub async fn read(&mut self) -> i16 {
         let t = T::regs();

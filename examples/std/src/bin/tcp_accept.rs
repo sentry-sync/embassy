@@ -12,21 +12,12 @@ use embedded_io::asynch::Write as _;
 use heapless::Vec;
 use log::*;
 use rand_core::{OsRng, RngCore};
-use static_cell::StaticCell;
+use static_cell::{make_static, StaticCell};
 
 #[path = "../tuntap.rs"]
 mod tuntap;
 
 use crate::tuntap::TunTapDevice;
-
-macro_rules! singleton {
-    ($val:expr) => {{
-        type T = impl Sized;
-        static STATIC_CELL: StaticCell<T> = StaticCell::new();
-        STATIC_CELL.init_with(move || $val)
-    }};
-}
-
 #[derive(Parser)]
 #[clap(version = "1.0")]
 struct Opts {
@@ -77,7 +68,12 @@ async fn main_task(spawner: Spawner) {
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
-    let stack = &*singleton!(Stack::new(device, config, singleton!(StackResources::<3>::new()), seed));
+    let stack = &*make_static!(Stack::new(
+        device,
+        config,
+        make_static!(StackResources::<3>::new()),
+        seed
+    ));
 
     // Launch network task
     spawner.spawn(net_task(stack)).unwrap();
@@ -112,7 +108,7 @@ async fn main_task(spawner: Spawner) {
         info!("Closing the connection");
         socket.abort();
         info!("Flushing the RST out...");
-        socket.flush().await;
+        _ = socket.flush().await;
         info!("Finished with the socket");
     }
 }
