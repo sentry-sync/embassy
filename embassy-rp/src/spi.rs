@@ -90,9 +90,15 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
                 w.set_sph(config.phase == Phase::CaptureOnSecondTransition);
                 w.set_scr(postdiv);
             });
-            p.cr1().write(|w| {
-                w.set_sse(true); // enable
+
+            // Always enable DREQ signals -- harmless if DMA is not listening
+            p.dmacr().write(|reg| {
+                reg.set_rxdmae(true);
+                reg.set_txdmae(true);
             });
+
+            // finally, enable.
+            p.cr1().write(|w| w.set_sse(true));
 
             if let Some(pin) = &clk {
                 pin.io().ctrl().write(|w| w.set_funcsel(1));
@@ -329,9 +335,6 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let tx_ch = self.tx_dma.as_mut().unwrap();
         let tx_transfer = unsafe {
-            self.inner.regs().dmacr().modify(|reg| {
-                reg.set_txdmae(true);
-            });
             // If we don't assign future to a variable, the data register pointer
             // is held across an await and makes the future non-Send.
             crate::dma::write(tx_ch, buffer, self.inner.regs().dr().ptr() as *mut _, T::TX_DREQ)
@@ -354,23 +357,20 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
     }
 
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
-        unsafe {
-            self.inner.regs().dmacr().write(|reg| {
-                reg.set_rxdmae(true);
-                reg.set_txdmae(true);
-            })
-        };
-        let tx_ch = self.tx_dma.as_mut().unwrap();
-        let tx_transfer = unsafe {
-            // If we don't assign future to a variable, the data register pointer
-            // is held across an await and makes the future non-Send.
-            crate::dma::write_repeated(tx_ch, self.inner.regs().dr().ptr() as *mut u8, buffer.len(), T::TX_DREQ)
-        };
+        // Start RX first. Transfer starts when TX starts, if RX
+        // is not started yet we might lose bytes.
         let rx_ch = self.rx_dma.as_mut().unwrap();
         let rx_transfer = unsafe {
             // If we don't assign future to a variable, the data register pointer
             // is held across an await and makes the future non-Send.
             crate::dma::read(rx_ch, self.inner.regs().dr().ptr() as *const _, buffer, T::RX_DREQ)
+        };
+
+        let tx_ch = self.tx_dma.as_mut().unwrap();
+        let tx_transfer = unsafe {
+            // If we don't assign future to a variable, the data register pointer
+            // is held across an await and makes the future non-Send.
+            crate::dma::write_repeated(tx_ch, self.inner.regs().dr().ptr() as *mut u8, buffer.len(), T::TX_DREQ)
         };
         join(tx_transfer, rx_transfer).await;
         Ok(())
@@ -388,11 +388,13 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         let (_, tx_len) = crate::dma::slice_ptr_parts(tx_ptr);
         let (_, rx_len) = crate::dma::slice_ptr_parts_mut(rx_ptr);
 
-        unsafe {
-            self.inner.regs().dmacr().write(|reg| {
-                reg.set_rxdmae(true);
-                reg.set_txdmae(true);
-            })
+        // Start RX first. Transfer starts when TX starts, if RX
+        // is not started yet we might lose bytes.
+        let rx_ch = self.rx_dma.as_mut().unwrap();
+        let rx_transfer = unsafe {
+            // If we don't assign future to a variable, the data register pointer
+            // is held across an await and makes the future non-Send.
+            crate::dma::read(rx_ch, self.inner.regs().dr().ptr() as *const _, rx_ptr, T::RX_DREQ)
         };
 
         let mut tx_ch = self.tx_dma.as_mut().unwrap();
@@ -410,13 +412,6 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
                     crate::dma::write_repeated(tx_ch, p.dr().ptr() as *mut u8, write_bytes_len, T::TX_DREQ).await
                 }
             }
-        };
-
-        let rx_ch = self.rx_dma.as_mut().unwrap();
-        let rx_transfer = unsafe {
-            // If we don't assign future to a variable, the data register pointer
-            // is held across an await and makes the future non-Send.
-            crate::dma::read(rx_ch, self.inner.regs().dr().ptr() as *const _, rx_ptr, T::RX_DREQ)
         };
         join(tx_transfer, rx_transfer).await;
 
